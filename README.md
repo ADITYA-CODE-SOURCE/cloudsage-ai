@@ -61,6 +61,14 @@ Open <http://localhost:5173>. The frontend contacts `http://localhost:8000`; set
 
 Docker must be running. The cases use dummy credentials and a dedicated Compose project name so teardown is isolated.
 
+Run all three cases, wait for the app to start, capture its actual logs, verify expected HTTP statuses, and tear down each isolated project with:
+
+```bash
+python3 demo/verify_compose.py
+```
+
+The runner expects HTTP 503 for each broken case and HTTP 200 for the corrected case; it exits nonzero if a live result differs.
+
 ```bash
 # Broken case: the app uses the host-published port from inside the Compose network.
 docker compose -p cloudsage-demo -f demo/compose.host-port.broken.yaml up --build -d
@@ -84,11 +92,14 @@ The application waits briefly for startup, but its `/health` endpoint itself tes
 
 If Docker is unavailable, the labeled host-port sample and other dashboard samples remain usable as **fixtures**; fixture text is not live runtime evidence.
 
+The checked-in broken/fixed Docker demo and database-name mismatch were live-tested with Docker Engine 29.6.2; observed HTTP results and scope are recorded in [`docs/docker-demo-verification.md`](docs/docker-demo-verification.md). This verifies only the demo stack.
+
 ## Checks
 
 ```bash
-cd backend && ../.venv/bin/pytest -q
-cd .. && npm run test && npm run build
+.venv/bin/pytest -q backend demo/app/test_diagnostics.py
+npm run test
+npm run build
 ```
 
 Tests use dummy provider credentials only in mocked calls; they never send secrets to Google.

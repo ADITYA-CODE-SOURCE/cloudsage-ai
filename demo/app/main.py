@@ -3,6 +3,7 @@ import time
 
 import psycopg
 from fastapi import FastAPI, HTTPException
+from diagnostics import public_database_error
 
 app = FastAPI(title="CloudSage demo application")
 
@@ -26,7 +27,9 @@ def health():
             connection.execute("SELECT 1")
         return {"status": "healthy", "database": "query succeeded"}
     except Exception as exc:
-        raise HTTPException(status_code=503, detail=f"database query failed: {exc.__class__.__name__}") from exc
+        reason = public_database_error(exc)
+        print(f"Health check failed: {reason}", flush=True)
+        raise HTTPException(status_code=503, detail=reason) from exc
 
 
 if __name__ == "__main__":
@@ -41,8 +44,8 @@ if __name__ == "__main__":
             ) as connection:
                 connection.execute("SELECT 1")
             break
-        except Exception:
-            print(f"Waiting for database ({attempt + 1}/10)...", flush=True)
+        except Exception as exc:
+            print(f"Waiting for database ({attempt + 1}/10): {public_database_error(exc)}", flush=True)
             time.sleep(2)
     else:
         print("Startup database check failed; API starts so /health can report 503.", flush=True)
