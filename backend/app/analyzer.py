@@ -141,11 +141,18 @@ def validate_changes(result: dict[str, Any]) -> dict[str, Any]:
 
 def _provider_error(exc: Exception) -> HTTPException:
     message = str(exc).lower()
-    if "quota" in message or "429" in message or "resource_exhausted" in message:
+    raw_status = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    try:
+        status = int(raw_status) if raw_status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    if status == 429 or "quota" in message or "429" in message or "resource_exhausted" in message:
         return HTTPException(429, "Gemma quota/rate limit reached. Check Google AI Studio quota and retry later.")
     model_unavailable = any(term in message for term in ("not found", "not available", "does not exist", "unsupported model", "not supported for"))
-    if "404" in message or model_unavailable:
+    if status == 404 or "404" in message or model_unavailable:
         return HTTPException(502, "Configured Gemma model is unavailable to this API key. Verify GEMMA_MODEL access.")
+    if status in {500, 502, 503, 504}:
+        return HTTPException(502, f"Google Gen AI returned a temporary server error (HTTP {status}). Retry later; no diagnosis was shown.")
     return HTTPException(502, "Gemma provider request failed. Check network access and backend configuration.")
 
 

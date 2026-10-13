@@ -137,6 +137,25 @@ def test_unavailable_model_and_network_errors_are_clear(monkeypatch, provider_me
     assert expected_text in err.value.detail.lower()
 
 
+def test_provider_internal_server_error_is_distinguished(monkeypatch):
+    class ServerError(RuntimeError):
+        code = 500
+
+    class Models:
+        async def generate_content(self, **kwargs):
+            raise ServerError("Internal error encountered")
+
+    class Client:
+        def __init__(self, **kwargs): self.aio = type("Aio", (), {"models": Models()})()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-dummy")
+    monkeypatch.setattr(analyzer.genai, "Client", Client)
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(analyzer.diagnose(DiagnoseRequest(logs="failure", compose="services:\n  app: {}")))
+    assert err.value.status_code == 502
+    assert "temporary server error (http 500)" in err.value.detail.lower()
+
+
 def test_valid_mocked_gemma_response_uses_redacted_sources_and_validates_citations(monkeypatch):
     submitted_prompts = []
     payload = {
