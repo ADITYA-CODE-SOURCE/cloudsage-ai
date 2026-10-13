@@ -143,7 +143,8 @@ def _provider_error(exc: Exception) -> HTTPException:
     message = str(exc).lower()
     if "quota" in message or "429" in message or "resource_exhausted" in message:
         return HTTPException(429, "Gemma quota/rate limit reached. Check Google AI Studio quota and retry later.")
-    if "not found" in message or "404" in message or "model" in message:
+    model_unavailable = any(term in message for term in ("not found", "not available", "does not exist", "unsupported model", "not supported for"))
+    if "404" in message or model_unavailable:
         return HTTPException(502, "Configured Gemma model is unavailable to this API key. Verify GEMMA_MODEL access.")
     return HTTPException(502, "Gemma provider request failed. Check network access and backend configuration.")
 

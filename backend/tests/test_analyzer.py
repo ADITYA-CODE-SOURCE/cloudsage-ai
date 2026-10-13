@@ -1,12 +1,15 @@
+import asyncio
+import json
+
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-import asyncio
 
 from app import analyzer
 from app.analyzer import compose_facts, parse_compose, redact, validate_citations
 from app.main import app
 from app.models import DiagnoseRequest
+from evaluate_gemma import CASES, run as run_gemma_evaluation
 
 
 def test_invalid_yaml_rejected():
@@ -109,6 +112,83 @@ def test_quota_provider_error_is_clear_and_bounded(monkeypatch):
         asyncio.run(analyzer.diagnose(DiagnoseRequest(logs="failure", compose="services:\n  app: {}")))
     assert err.value.status_code == 429
     assert "quota" in err.value.detail.lower()
+
+
+@pytest.mark.parametrize(
+    ("provider_message", "expected_status", "expected_text"),
+    [
+        ("404 model not found", 502, "model is unavailable"),
+        ("connection reset by peer", 502, "provider request failed"),
+    ],
+)
+def test_unavailable_model_and_network_errors_are_clear(monkeypatch, provider_message, expected_status, expected_text):
+    class Models:
+        async def generate_content(self, **kwargs):
+            raise RuntimeError(provider_message)
+
+    class Client:
+        def __init__(self, **kwargs): self.aio = type("Aio", (), {"models": Models()})()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-dummy")
+    monkeypatch.setattr(analyzer.genai, "Client", Client)
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(analyzer.diagnose(DiagnoseRequest(logs="failure", compose="services:\n  app: {}")))
+    assert err.value.status_code == expected_status
+    assert expected_text in err.value.detail.lower()
+
+
+def test_valid_mocked_gemma_response_uses_redacted_sources_and_validates_citations(monkeypatch):
+    submitted_prompts = []
+    payload = {
+        "status": "likely_cause",
+        "summary": "The supplied error was observed.",
+        "findings": [{
+            "title": "Database connection refused",
+            "explanation": "The log contains a connection refusal.",
+            "kind": "observed_fact",
+            "evidence": [{"source": "logs", "start_line": 2, "end_line": 2, "quote": "Connection refused"}],
+            "beginner_note": None,
+        }],
+        "proposed_changes": [{
+            "explanation": "No change; this fixture only verifies parsing.",
+            "before": "services:\n  app: {}",
+            "after": "services:\n  app: {}",
+            "yaml_valid": False,
+        }],
+        "verification_steps": [],
+        "missing_information": [],
+        "model_identifier": "provider-returned-name",
+        "analysis_source": "Gemma via Google Gen AI",
+    }
+
+    class Models:
+        async def generate_content(self, **kwargs):
+            submitted_prompts.append(kwargs["contents"])
+            return type("Response", (), {"text": json.dumps(payload)})()
+
+    class Client:
+        def __init__(self, **kwargs): self.aio = type("Aio", (), {"models": Models()})()
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-only-dummy")
+    monkeypatch.setenv("GEMMA_MODEL", "configured-gemma-test")
+    monkeypatch.setattr(analyzer.genai, "Client", Client)
+    request = DiagnoseRequest(logs="PASSWORD=mock-only\nConnection refused", compose="services:\n  app: {}")
+    response = asyncio.run(analyzer.diagnose(request))
+    assert "mock-only" not in submitted_prompts[0]
+    assert response.redacted_logs.splitlines() == ["PASSWORD=[REDACTED]", "Connection refused"]
+    assert response.findings[0].source_matched is True
+    assert response.findings[0].evidence[0].quote == response.redacted_logs.splitlines()[1]
+    assert response.proposed_changes[0].yaml_valid is True
+    assert response.model_identifier == "configured-gemma-test"
+
+
+def test_live_evaluator_uses_four_cases_and_skips_without_credentials(monkeypatch, capsys):
+    assert [case[0] for case in CASES] == ["wrong database port", "database name mismatch", "incomplete context", "healthy input"]
+    for _, _, compose in CASES:
+        parse_compose(compose)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    assert asyncio.run(run_gemma_evaluation()) == 2
+    assert "NOT RUN" in capsys.readouterr().out
 
 
 def test_api_health_and_missing_credentials_are_clear(monkeypatch):

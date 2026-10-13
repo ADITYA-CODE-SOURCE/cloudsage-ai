@@ -56,6 +56,7 @@ Open <http://localhost:5173>. The frontend contacts `http://localhost:8000` by d
 - Backend uses the Google Gen AI Python SDK (`google-genai`); the SDK package and structured JSON schema configuration install successfully.
 - **Live availability/access to the requested model has not been verified:** no API key is configured in this environment. Availability depends on Google API support and the account's model access. CloudSage does not silently substitute another provider or model. If the model is not available to your key, set `GEMMA_MODEL` to a Gemma model your account can access.
 - Provider calls have a 30-second SDK timeout, no application-level retry loop, and clear quota/unavailable/network/malformed-output responses. No saved diagnosis is substituted for a failed live request.
+- To run the sequential, four-case live evaluation when credentials are available, see [`docs/gemma-evaluation.md`](docs/gemma-evaluation.md). It makes no retries and does not save raw sample inputs or outputs.
 
 ## Demo walkthrough commands
 
