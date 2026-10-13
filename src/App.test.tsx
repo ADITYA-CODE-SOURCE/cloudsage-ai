@@ -46,6 +46,8 @@ describe('CloudSage diagnosis workspace', () => {
     expect(await screen.findByRole('heading', { name: 'Database port rejected' })).toBeTruthy()
     expect(screen.getAllByText('gemma-test-model').length).toBeGreaterThan(0)
     expect(screen.getByText('The app is attempting the database connection on an unexpected port.')).toBeTruthy()
+    expect(screen.getByText('Use the database container port.')).toBeTruthy()
+    expect(screen.getByText('Source matched')).toBeTruthy()
     const request = fetchMock.mock.calls.find(([, init]) => init?.method === 'POST')
     expect(request).toBeDefined()
     expect(JSON.parse(request?.[1]?.body as string)).toEqual({ logs: sample.logs, compose: sample.compose })
@@ -59,6 +61,12 @@ describe('CloudSage diagnosis workspace', () => {
     expect(await screen.findByText('present')).toBeTruthy()
     expect(screen.getByText('not checked')).toBeTruthy()
     expect(screen.getByText(/does not prove the application is healthy/i)).toBeTruthy()
+
+    await user.click(screen.getAllByRole('button', { name: 'Service Map' })[0])
+    expect(screen.getByText(/does not contain structured service nodes or dependency edges/i)).toBeTruthy()
+    await user.click(screen.getAllByRole('button', { name: 'Incident Report' })[0])
+    expect(screen.getByRole('heading', { name: 'Incident report' })).toBeTruthy()
+    expect(screen.getByText(/manually supplied/i)).toBeTruthy()
   })
 
   it('marks an explicit synthetic preview as demo data, not live analysis', async () => {

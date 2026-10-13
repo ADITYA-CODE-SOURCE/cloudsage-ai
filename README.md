@@ -95,6 +95,8 @@ If Docker is unavailable, the labeled host-port sample and other dashboard sampl
 
 The checked-in broken/fixed Docker demo and database-name mismatch were live-tested with Docker Engine 29.6.2; observed HTTP results and scope are recorded in [`docs/docker-demo-verification.md`](docs/docker-demo-verification.md). This verifies only the demo stack.
 
+The merged frontend/backend rehearsal and remaining live-AI blocker are recorded in [`docs/end-to-end-rehearsal.md`](docs/end-to-end-rehearsal.md).
+
 ## Checks
 
 ```bash
