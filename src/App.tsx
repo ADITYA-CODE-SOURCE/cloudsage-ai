@@ -1,74 +1,210 @@
-import { useMemo, useState } from 'react'
-import { AlertTriangle, ArrowDown, ArrowRight, Check, CheckCircle2, ChevronRight, CircleHelp, Cloud, Copy, Download, FileCode2, FileText, LoaderCircle, LockKeyhole, ShieldCheck, Sparkles, Upload, X } from 'lucide-react'
-import yaml from 'js-yaml'
-import { compareIncident } from './verification'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AlertCircle, ArrowRight, Check, FileText, LoaderCircle, Play, ShieldCheck, Sparkles } from 'lucide-react'
+import { ApiError, checkBackend, defaultApiBase, diagnoseRequest } from './api'
+import { AppShell, PageHeading, StatusBadge } from './components/StatusBadge'
+import { DiagnosisSummary } from './components/DiagnosisSummary'
+import { FixDiff } from './components/FixDiff'
+import { ReportView } from './components/ReportView'
+import { ServiceMap } from './components/ServiceMap'
+import { SettingsView } from './components/SettingsView'
+import { SourceInput } from './components/SourceInput'
+import { SourceViewer } from './components/SourceViewer'
+import { VerificationPanel } from './components/VerificationPanel'
+import { compareIncident, exportReport, makeDemoResult, originalLogQuotes, samples, validateSources } from './incident'
+import type { AnalysisMode, AppView, DiagnosisResult, Evidence, HealthResult, IncidentVerification, SourceKind } from './types'
+import './style.css'
 
-type Evidence = { source: 'logs' | 'compose'; start_line: number; end_line: number; quote: string }
-type Finding = { title: string; explanation: string; kind: 'observed_fact'|'hypothesis'; evidence: Evidence[]; beginner_note?: string; source_matched: boolean }
-type Change = { explanation: string; before: string; after: string; yaml_valid: boolean }
-type Result = { status: string; summary: string; findings: Finding[]; proposed_changes: Change[]; verification_steps: string[]; missing_information: string[]; model_identifier: string; analysis_source: string; redacted_logs: string; redacted_compose: string; deterministic_checks: string[]; caveat: string }
-type Sample = { id: string; name: string; label: string; logs: string; compose: string }
-
-const samples: Sample[] = [
-  { id: 'host-port', name: 'Host port used internally', label: 'FIXTURE · HOST PORT', logs: 'Starting web service\nDatabase connection failed: dial tcp 172.21.0.2:15432: connect: connection refused\nApplication startup aborted', compose: `services:\n  app:\n    build: ./app\n    environment:\n      DB_HOST: db\n      DB_PORT: "15432"\n      DB_NAME: demo\n      DB_USER: demo\n      DB_PASSWORD: demo\n    depends_on:\n      db:\n        condition: service_healthy\n  db:\n    image: postgres:16-alpine\n    environment:\n      POSTGRES_DB: demo\n      POSTGRES_USER: demo\n      POSTGRES_PASSWORD: demo\n    ports:\n      - "15432:5432"\n    healthcheck:\n      test: ["CMD-SHELL", "pg_isready -U demo -d demo"]\n      interval: 2s\n      timeout: 2s\n      retries: 10` },
-  { id: 'db-name', name: 'Mismatched database names', label: 'FIXTURE', logs: 'Database is accepting connections\nFATAL: database "inventory" does not exist\nApplication startup aborted', compose: `services:\n  app:\n    build: ./app\n    environment:\n      DB_HOST: db\n      DB_PORT: "5432"\n      DB_NAME: inventory\n      DB_USER: demo\n      DB_PASSWORD: demo\n    depends_on:\n      db:\n        condition: service_healthy\n  db:\n    image: postgres:16-alpine\n    environment:\n      POSTGRES_DB: catalog\n      POSTGRES_USER: demo\n      POSTGRES_PASSWORD: demo\n    healthcheck:\n      test: ["CMD-SHELL", "pg_isready -U demo -d catalog"]\n      interval: 2s\n      timeout: 2s\n      retries: 10` },
-  { id: 'incomplete', name: 'Incomplete context', label: 'SAMPLE', logs: 'ERROR: connection failed\nRetrying...', compose: 'services:\n  app:\n    image: example/app:latest' },
-  { id: 'healthy', name: 'Healthy input', label: 'SAMPLE', logs: 'GET /health 200 OK\nDatabase query succeeded', compose: `services:\n  app:\n    environment:\n      DB_HOST: db\n      DB_PORT: "5432"\n  db:\n    image: postgres:16\n    ports:\n      - "15432:5432"` },
-]
-
-const lines = (value: string) => value.split('\n')
-function download(name: string, content: string) { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([content], { type: 'text/plain' })); a.download = name; a.click(); URL.revokeObjectURL(a.href) }
+type Inputs = { logs: string; compose: string }
+type FileInfo = { name: string; size: number } | null
 
 export default function App() {
-  const [logs, setLogs] = useState(''); const [compose, setCompose] = useState(''); const [result, setResult] = useState<Result|null>(null)
-  const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [selected, setSelected] = useState<Evidence|null>(null)
-  const [fresh, setFresh] = useState(''); const [health, setHealth] = useState<'passed'|'failed'|'not checked'>('not checked'); const [verified, setVerified] = useState(false)
-  const load = (sample: Sample) => { setLogs(sample.logs); setCompose(sample.compose); setResult(null); setError(''); setSelected(null); setVerified(false); setFresh(''); setHealth('not checked') }
-  const file = async (source: 'logs'|'compose', f?: File) => { if (!f) return; const allowed = source === 'compose' ? /\.(ya?ml)$/i.test(f.name) : /\.(log|txt)$/i.test(f.name); if (!allowed) { setError(source === 'compose' ? 'Choose a .yml or .yaml file.' : 'Choose a .log or .txt file.'); return } if (f.size > 100_000) { setError('Files must be 100 KB or smaller.'); return } const text = await f.text(); source === 'logs' ? setLogs(text) : setCompose(text); setResult(null); setError('') }
-  const diagnose = async () => {
-    setError(''); setResult(null); setSelected(null)
-    if (!logs.trim() || !compose.trim()) { setError('Add both application logs and Compose YAML before diagnosing.'); return }
-    if (new Blob([logs]).size > 100_000 || new Blob([compose]).size > 100_000) { setError('Each input must be 100 KB or smaller.'); return }
-    try { const parsed = yaml.load(compose); if (!parsed || typeof parsed !== 'object' || !('services' in parsed)) throw new Error('Compose YAML must contain a services mapping.') } catch (e) { setError(e instanceof Error ? e.message : 'Invalid YAML.'); return }
-    setBusy(true)
-    try { const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 45_000); const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/api/diagnose`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ logs, compose }), signal: controller.signal }); clearTimeout(timer); const payload = await response.json(); if (!response.ok) throw new Error(payload.detail || 'Diagnosis request failed.'); setResult(payload) }
-    catch (e) { setError(e instanceof Error && e.name === 'AbortError' ? 'Analysis timed out. Check backend/network and retry.' : (e instanceof Error ? e.message : 'Network request failed.')) }
-    finally { setBusy(false) }
+  const [view, setView] = useState<AppView>('diagnose')
+  const [inputs, setInputs] = useState<Inputs>({ logs: '', compose: '' })
+  const [files, setFiles] = useState<Record<SourceKind, FileInfo>>({ logs: null, compose: null })
+  const [result, setResult] = useState<DiagnosisResult|null>(null)
+  const [mode, setMode] = useState<AnalysisMode|null>(null)
+  const [analyzedInputs, setAnalyzedInputs] = useState<Inputs|null>(null)
+  const [createdAt, setCreatedAt] = useState<string|null>(null)
+  const [verification, setVerification] = useState<IncidentVerification|null>(null)
+  const [activeEvidence, setActiveEvidence] = useState<Evidence|null>(null)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [apiBase, setApiBase] = useState(defaultApiBase)
+  const [connection, setConnection] = useState<'checking'|'connected'|'offline'>('checking')
+  const [checkingConnection, setCheckingConnection] = useState(false)
+  const requestId = useRef(0)
+  const healthRequestId = useRef(0)
+  const controller = useRef<AbortController|null>(null)
+  const timer = useRef<number|undefined>(undefined)
+
+  const validation = useMemo(() => validateSources(inputs.logs, inputs.compose), [inputs])
+  const stale = Boolean(result && analyzedInputs && (inputs.logs !== analyzedInputs.logs || inputs.compose !== analyzedInputs.compose))
+  const visibleInputs = result && !stale ? { logs: result.redacted_logs, compose: result.redacted_compose } : inputs
+
+  const cancelAnalysis = useCallback(() => {
+    requestId.current += 1
+    controller.current?.abort()
+    controller.current = null
+    if (timer.current) window.clearTimeout(timer.current)
+    setBusy(false)
+  }, [])
+
+  const onCheck = useCallback(async (base = apiBase) => {
+    const checkId = ++healthRequestId.current
+    setCheckingConnection(true); setConnection('checking')
+    const checkController = new AbortController()
+    const timeout = window.setTimeout(() => checkController.abort(), 5_000)
+    try {
+      await checkBackend(base, checkController.signal)
+      if (checkId === healthRequestId.current) setConnection('connected')
+    } catch {
+      if (checkId === healthRequestId.current) setConnection('offline')
+    } finally {
+      window.clearTimeout(timeout)
+      if (checkId === healthRequestId.current) setCheckingConnection(false)
+    }
+  }, [apiBase])
+
+  useEffect(() => {
+    void onCheck()
+    return () => { controller.current?.abort(); if (timer.current) window.clearTimeout(timer.current) }
+  }, []) // Initial backend reachability is checked once; it never implies model readiness.
+
+  const updateInput = (source: SourceKind, value: string) => {
+    cancelAnalysis()
+    setInputs((current) => ({ ...current, [source]: value }))
+    setFiles((current) => ({ ...current, [source]: null }))
+    setError('')
   }
-  const originalQuotes = result ? result.findings.filter(f => f.kind === 'observed_fact').flatMap(f => f.evidence.filter(e => e.source === 'logs').map(e => e.quote)) : []
-  const comparison = compareIncident(originalQuotes, verified ? fresh : '', health)
-  const original = comparison.originalError
-  return <div className="app-shell">
-    <header className="topbar"><a className="brand" href="#top"><span className="brand-mark"><Cloud size={19}/></span><span>cloudsage<span className="brand-ai"> AI</span></span></a><div className="top-meta"><span className="hosted"><span className="pulse"/>Hosted model analysis</span><span className="top-divider"/><span className="privacy"><LockKeyhole size={13}/> Redacted before sending</span></div><button className="help-button" aria-label="About CloudSage"><CircleHelp size={18}/></button></header>
-    <main id="top"><section className="hero"><div className="eyebrow"><span className="eyebrow-line"/> DEPLOYMENT INVESTIGATION <span className="version">BETA</span></div><h1>Find the signal<br/><em>in the failure.</em></h1><p>Connect runtime errors to your Compose configuration. Get a traceable diagnosis, review a minimal fix, verify the result.</p><div className="hero-caption"><ShieldCheck size={15}/> Evidence-linked analysis <span/> Your inputs stay in this browser session</div></section>
-      <section className="samples"><div><span className="section-kicker">START WITH A CASE</span><p>Load a sample incident</p></div><div className="sample-list">{samples.map(s=><button key={s.id} className="sample-card" onClick={()=>load(s)}><span className="sample-tag">{s.label}</span><span>{s.name}</span><ArrowRight size={15}/></button>)}</div></section>
-      <section className="workspace"><div className="section-heading"><div><span className="section-kicker">01 / INPUT WORKSPACE</span><h2>Bring the incident context</h2></div><span className="size-note">Logs and YAML · 100 KB max each</span></div><div className="input-grid">
-        <Editor title="Application logs" subtitle="Paste container or application output" icon={<FileText size={17}/>} value={result?.redacted_logs ?? logs} onChange={v=>{setLogs(v);setResult(null)}} onFile={f=>file('logs',f)} source="logs" selected={selected}/>
-        <Editor title="Docker Compose" subtitle="Paste the relevant compose.yaml" icon={<FileCode2 size={17}/>} value={result?.redacted_compose ?? compose} onChange={v=>{setCompose(v);setResult(null)}} onFile={f=>file('compose',f)} source="compose" selected={selected}/>
-      </div><div className="action-row"><div className="privacy-note"><LockKeyhole size={14}/> Best-effort secret masking · Hosted Gemma analysis requires internet</div><button className="primary-button" onClick={diagnose} disabled={busy}>{busy?<><LoaderCircle className="spin" size={17}/> Analyzing with Gemma…</>:<><Sparkles size={16}/> Diagnose deployment <ArrowRight size={16}/></>}</button></div>{error&&<div className="error-banner" role="alert"><AlertTriangle size={17}/>{error}</div>}</section>
-      {busy&&<div className="loading-panel"><span className="loading-icon"><LoaderCircle className="spin"/></span><div><b>Following the evidence trail</b><p>Sending redacted inputs to Gemma. This can take a moment.</p></div></div>}
-      {result&&<>
-        <section className="results-section"><div className="section-heading result-head"><div><span className="section-kicker">02 / INVESTIGATION</span><h2>Diagnosis</h2></div><div className="model-chip"><span className="model-dot"/><span>{result.model_identifier}</span><small>· {result.analysis_source}</small></div></div>
-          <div className={`summary-card ${result.status}`}><div className="summary-symbol">{result.status==='likely_cause'?<AlertTriangle size={20}/>:result.status==='no_failure_found'?<CheckCircle2 size={20}/>:<CircleHelp size={20}/>}</div><div><span className="status-label">{result.status.replaceAll('_',' ')}</span><h3>{result.summary}</h3><p>{result.caveat}</p></div></div>
-          {result.deterministic_checks.length>0&&<div className="checks-block"><span className="section-kicker">DETERMINISTIC CONFIGURATION CHECKS</span>{result.deterministic_checks.map((c,i)=><p key={i}><Check size={14}/>{c}</p>)}</div>}
-          <div className="findings-layout"><div><div className="subheading"><span className="section-kicker">FINDINGS</span><span className="muted-small">Select evidence to highlight source</span></div><div className="finding-list">{result.findings.map((f,i)=><article className="finding-card" key={i}><div className="finding-top"><span className={`kind ${f.kind}`}>{f.kind==='observed_fact'?'OBSERVED':'HYPOTHESIS'}</span><span className="source-match">{f.source_matched&&<><Check size={12}/> Source matched</>}</span></div><h3>{f.title}</h3><p>{f.explanation}</p>{f.beginner_note&&<div className="beginner-note"><Sparkles size={13}/>{f.beginner_note}</div>}<div className="citation-row">{f.evidence.map((e,j)=><button className={`citation ${selected===e?'active':''}`} key={j} onClick={()=>setSelected(e)}><ChevronRight size={12}/>{e.source==='logs'?'Logs':'Compose'} · L{e.start_line}{e.end_line!==e.start_line?`–${e.end_line}`:''}</button>)}</div></article>)}{result.findings.length===0&&<div className="empty-findings">No evidence-backed findings were returned.</div>}</div></div>
-            <aside className="source-preview"><div className="preview-head"><span className="section-kicker">SOURCE PREVIEW</span>{selected&&<span className="preview-source">{selected.source==='logs'?'LOGS':'COMPOSE'} · L{selected.start_line}</span>}</div>{selected?<pre>{lines(selected.source==='logs'?result.redacted_logs:result.redacted_compose).map((line,i)=><code key={i} className={i+1>=selected.start_line&&i+1<=selected.end_line?'highlight':''}><span>{i+1}</span>{line||' '}</code>)}</pre>:<div className="preview-empty"><ArrowDown size={18}/><p>Select a citation<br/>to inspect its source lines.</p></div>}</aside></div>
+  const clearInput = (source: SourceKind) => updateInput(source, '')
+  const onFile = async (source: SourceKind, file: File) => {
+    const text = await file.text()
+    cancelAnalysis()
+    setInputs((current) => ({ ...current, [source]: text }))
+    setFiles((current) => ({ ...current, [source]: { name: file.name, size: file.size } }))
+    setError('')
+  }
+  const loadSample = (sampleId: string) => {
+    const sample = samples.find((entry) => entry.id === sampleId)
+    if (!sample) return
+    cancelAnalysis()
+    setInputs({ logs: sample.logs, compose: sample.compose })
+    setFiles({ logs: null, compose: null })
+    setError('')
+    setActiveEvidence(null)
+    setView('diagnose')
+    // Loading a fixture only changes inputs; it never claims an analysis occurred.
+  }
+
+  const finishAnalysis = (next: DiagnosisResult, nextMode: AnalysisMode, snapshot: Inputs) => {
+    setResult(next)
+    setMode(nextMode)
+    setAnalyzedInputs(snapshot)
+    setCreatedAt(new Date().toISOString())
+    setVerification(null)
+    setActiveEvidence(null)
+    setError('')
+    setView('diagnose')
+  }
+
+  const runDiagnosis = async () => {
+    if (!validation.valid) { setError(validation.error ?? 'Input is not ready.'); return }
+    cancelAnalysis()
+    const currentId = requestId.current
+    const activeController = new AbortController()
+    controller.current = activeController
+    const snapshot = { ...inputs }
+    setBusy(true); setError('')
+    timer.current = window.setTimeout(() => activeController.abort(), 50_000)
+    try {
+      const response = await diagnoseRequest(apiBase, snapshot, activeController.signal)
+      if (currentId !== requestId.current) return
+      finishAnalysis(response, 'live', snapshot)
+    } catch (requestError) {
+      if (currentId !== requestId.current) return
+      if (requestError instanceof DOMException && requestError.name === 'AbortError') setError('Analysis timed out or was cancelled. Check the backend/provider connection and retry.')
+      else if (requestError instanceof ApiError) setError(requestError.message)
+      else setError('The diagnosis request failed unexpectedly. No saved result was substituted.')
+    } finally {
+      if (timer.current) window.clearTimeout(timer.current)
+      if (currentId === requestId.current) { setBusy(false); controller.current = null }
+    }
+  }
+
+  const previewDemo = () => {
+    cancelAnalysis()
+    const sample = samples.find((entry) => entry.id === 'port')!
+    const demoInputs = { logs: sample.logs, compose: sample.compose }
+    setInputs(demoInputs)
+    setFiles({ logs: null, compose: null })
+    finishAnalysis(makeDemoResult(demoInputs.logs, demoInputs.compose), 'demo', demoInputs)
+  }
+
+  const onEvidence = (evidence: Evidence) => {
+    setActiveEvidence(evidence)
+    window.requestAnimationFrame(() => {
+      const viewer = document.getElementById('evidence-source-viewer')
+      if (viewer && typeof viewer.scrollIntoView === 'function') viewer.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+  }
+
+  const compare = (freshLogs: string, health: HealthResult) => {
+    if (!result || stale) return
+    setVerification(compareIncident(originalLogQuotes(result), freshLogs, health))
+  }
+
+  const exportIncident = () => {
+    if (!result || !mode) return
+    const content = exportReport(result, mode, verification, createdAt ?? new Date().toISOString())
+    const link = document.createElement('a')
+    link.href = URL.createObjectURL(new Blob([content], { type: 'text/markdown;charset=utf-8' }))
+    link.download = 'cloudsage-incident-report.md'
+    link.click()
+    URL.revokeObjectURL(link.href)
+  }
+
+  const applyApiBase = (value: string) => {
+    setApiBase(value || defaultApiBase())
+    setConnection('checking')
+  }
+
+  return <AppShell view={view} onView={setView} connection={connection} mode={stale ? null : mode} model={!stale&&mode === 'live' ? result?.model_identifier ?? null : null}>
+    {view === 'diagnose'&&<>
+      <PageHeading eyebrow="DEPLOYMENT INVESTIGATION" title="Diagnose deployment failures with evidence." description="Connect runtime errors to Compose configuration. Review traceable findings, then verify the change yourself." action={<div className="privacy-chip"><ShieldCheck size={14}/> Hosted analysis · best-effort redaction</div>}/>
+      <ProgressSteps inputsValid={validation.valid} analyzed={Boolean(result&&!stale)} verified={Boolean(verification&&!stale)} mode={mode}/>
+      <section className="samples-bar"><div className="samples-label"><span className="section-overline">START WITH A CASE</span><small>Samples fill inputs only</small></div><div className="sample-buttons">{samples.map((sample)=><button key={sample.id} className="sample-button" onClick={()=>loadSample(sample.id)}><span className="sample-dot"/>{sample.title}<small>{sample.badge}</small></button>)}</div><button className="demo-preview-button" disabled={busy} onClick={previewDemo}><Play size={13}/> Preview demo results</button></section>
+      <div className="workspace-grid">
+        <section className="input-workspace"><div className="section-row workspace-title"><div><span className="section-overline">01 / ADD EVIDENCE</span><h2>Incident sources</h2></div><span className="input-limit">100 KB max each</span></div>
+          <SourceInput kind="logs" value={visibleInputs.logs} filename={files.logs?.name??null} fileSize={files.logs?.size} error={visibleInputs.logs.trim()&&new TextEncoder().encode(inputs.logs).byteLength>100_000?'Logs exceed the 100 KB limit.':undefined} onChange={(value)=>updateInput('logs',value)} onFile={(file)=>void onFile('logs',file)} onClear={()=>clearInput('logs')} selectedLines={!stale&&activeEvidence?.source==='logs'?[activeEvidence.start_line,activeEvidence.end_line]:null}/>
+          <SourceInput kind="compose" value={visibleInputs.compose} filename={files.compose?.name??null} fileSize={files.compose?.size} error={visibleInputs.compose.trim()&&new TextEncoder().encode(inputs.compose).byteLength>100_000?'Compose YAML exceeds the 100 KB limit.':undefined} onChange={(value)=>updateInput('compose',value)} onFile={(file)=>void onFile('compose',file)} onClear={()=>clearInput('compose')} selectedLines={!stale&&activeEvidence?.source==='compose'?[activeEvidence.start_line,activeEvidence.end_line]:null}/>
+          {inputs.compose.trim()&&!validation.valid&&<div className="input-validation" role="alert"><AlertCircle size={14}/>{validation.error}</div>}
+          {error&&<div className="request-error" role="alert"><AlertCircle size={15}/><span>{error}</span></div>}
+          <div className="analysis-actions"><button className="button-primary diagnose-button" disabled={!validation.valid||busy} onClick={()=>void runDiagnosis()}>{busy?<><LoaderCircle size={16} className="spin"/> Diagnosing with Gemma…</>:<><Sparkles size={16}/> Diagnose deployment <ArrowRight size={15}/></>}</button><p><ShieldCheck size={13}/> Hosted analysis sends redacted inputs to the configured AI provider. Secret masking is best-effort.</p></div>
         </section>
-        <section className="fix-section"><div className="section-heading"><div><span className="section-kicker">03 / PROPOSED FIX</span><h2>Review before you apply</h2></div><span className="manual-label"><LockKeyhole size={13}/> Manual review required</span></div>{result.proposed_changes.length?result.proposed_changes.map((c,i)=><div className="fix-card" key={i}><p>{c.explanation}</p><div className="syntax-state"><CheckCircle2 size={14}/> YAML syntax {c.yaml_valid?'valid':'invalid'} <span>· Syntax only, not runtime verification</span></div><div className="diff-grid"><div className="diff-pane removed"><div className="diff-title"><X size={13}/> BEFORE</div><pre>{c.before}</pre></div><div className="diff-arrow"><ArrowRight/></div><div className="diff-pane added"><div className="diff-title"><Check size={13}/> AFTER</div><pre>{c.after}</pre></div></div><div className="fix-actions"><button onClick={()=>navigator.clipboard.writeText(c.after)}><Copy size={14}/> Copy proposed YAML</button><button onClick={()=>download('cloudsage-proposed-compose.yaml',c.after)}><Download size={14}/> Download YAML</button></div></div>):<div className="no-fix">No configuration change was proposed. Review the findings and missing context before changing deployment settings.</div>}{result.missing_information.length>0&&<div className="missing-info"><b>Still needed</b>{result.missing_information.map((m,i)=><span key={i}>{m}</span>)}</div>}</section>
-        <section className="verify-section"><div className="section-heading"><div><span className="section-kicker">04 / AFTER THE CHANGE</span><h2>Compare fresh results</h2></div><span className="session-only">Session only · not saved</span></div><p className="verify-intro">Apply any change yourself, then paste fresh application logs and record your health check. Missing error text does not establish recovery.</p><textarea aria-label="Fresh logs after applying the change" className="fresh-logs" placeholder="Paste fresh logs after you manually apply a change…" value={fresh} onChange={e=>{setFresh(e.target.value);setVerified(false)}}/><div className="health-row"><label htmlFor="health-result">Application health <span>Manually supplied check result</span></label><select id="health-result" value={health} onChange={e=>{setHealth(e.target.value as typeof health);setVerified(false)}}><option value="not checked">Not checked</option><option value="passed">Passed</option><option value="failed">Failed</option></select><button className="secondary-button" onClick={()=>setVerified(true)} disabled={!fresh.trim()}>Compare results <ArrowRight size={14}/></button></div>{verified&&<div className="verification-result"><div><span className="section-kicker">ORIGINAL ERROR</span><b className={original}>{original}</b></div><div><span className="section-kicker">APPLICATION HEALTH</span><b className={health}>{health}</b><small>{health==='not checked'?'Not checked':`Manually reported ${health}`}</small></div><p>“Not observed” is based on matching the original exact log signature. Absence of an error does not prove recovery.</p></div>}</section>
-        <footer className="result-footer"><span><ShieldCheck size={14}/> Inputs displayed here are the same best-effort redacted content sent to the hosted model.</span><button onClick={()=>download('cloudsage-incident-report.md',report(result,original,health))}><Download size={14}/> Download redacted report</button></footer>
-      </>}
-      <footer className="site-footer"><span>CloudSage AI <span>·</span> Evidence-backed deployment diagnosis</span><span>AI hypotheses require human review</span></footer>
-    </main>
-  </div>
+        <section className="results-workspace"><div className="section-row results-title"><div><span className="section-overline">02 / DIAGNOSE</span><h2>Analysis results</h2></div>{result&&<StatusBadge tone={mode==='demo'?'demo':'live'}>{mode==='demo'?'DEMO DATA':'LIVE ANALYSIS'}</StatusBadge>}</div>
+          {busy?<div className="analysis-loading" role="status" aria-live="polite"><div className="loading-orbit"><LoaderCircle size={22}/></div><h3>Following the evidence trail</h3><p>Sending best-effort redacted sources to the hosted model. This can take a moment.</p><span>Request timeout · 50 seconds</span></div>:result?<>
+            {mode==='demo'&&<div className="demo-banner" role="status"><span className="demo-indicator"/><div><b>Demo Data — no live AI call</b><span>Synthetic preview only. Click Diagnose deployment to request a live analysis.</span></div></div>}
+            <DiagnosisSummary result={result} onEvidence={onEvidence} stale={stale}/>
+            <SourceViewer logs={result.redacted_logs} compose={result.redacted_compose} active={activeEvidence}/>
+            <section className="result-subpanel"><div className="section-row"><div><span className="section-overline">03 / PROPOSED FIX</span><h2>Review before applying</h2></div></div><FixDiff changes={result.proposed_changes}/></section>
+            <section className="result-subpanel"><div className="section-row"><div><span className="section-overline">04 / VERIFY RECOVERY</span><h2>Compare after the change</h2></div></div><VerificationPanel key={`${createdAt}-${mode}`} value={verification} onCompare={compare} stale={stale}/></section>
+          </>:<div className="results-empty"><div className="empty-graphic"><div className="empty-file"><FileText size={20}/><span/></div><div className="empty-dash dash-one"/><div className="empty-dash dash-two"/><div className="empty-target"><Sparkles size={18}/></div></div><span className="section-overline">READY WHEN YOU ARE</span><h3>Your evidence, connected.</h3><p>Add logs and Compose YAML, then run a live diagnosis. Findings will link back to the exact redacted source lines.</p><div className="empty-points"><span><Check size={13}/> Traceable evidence</span><span><Check size={13}/> Minimal fix review</span><span><Check size={13}/> Manual verification</span></div></div>}
+        </section>
+      </div>
+      <div className="disclaimer-strip"><AlertCircle size={14}/><span>Source matching supports traceability, not causality. Review suggestions and verify application health independently.</span></div>
+    </>}
+    {view==='service-map'&&<><PageHeading eyebrow="CONFIGURATION TOPOLOGY" title="Service Map" description="Inspect backend-supplied deployment checks without inferring unverified service health."/><ServiceMap result={result} stale={stale}/></>}
+    {view==='report'&&<ReportView result={result} mode={mode} verification={verification} createdAt={createdAt} stale={stale} onExport={exportIncident}/>}
+    {view==='settings'&&<SettingsView apiBase={apiBase} setApiBase={applyApiBase} connection={connection} checking={checkingConnection} onCheck={()=>void onCheck(apiBase)} result={result} mode={mode}/>}
+    <footer className="workspace-footer"><span><span className="footer-mark"/> CloudSage AI</span><span>Open-weight AI diagnostics <i/> Incident content stays in this tab only</span></footer>
+  </AppShell>
 }
 
-function Editor({title,subtitle,icon,value,onChange,onFile,source,selected}:{title:string;subtitle:string;icon:React.ReactNode;value:string;onChange:(s:string)=>void;onFile:(f?:File)=>void;source:'logs'|'compose';selected:Evidence|null}) {
- const area = useMemo(()=>lines(value),[value]); return <div className={`editor-card ${selected?.source===source?'has-selection':''}`}><div className="editor-heading"><span className="editor-icon">{icon}</span><div><b>{title}</b><small>{subtitle}</small></div><label className="upload-button" title={`Upload ${title}`}><Upload size={14}/><input type="file" accept={source==='logs'?'.log,.txt,text/plain':'.yaml,.yml,text/yaml'} onChange={e=>onFile(e.target.files?.[0])}/></label></div><div className="code-wrap"><div className="line-numbers" aria-hidden="true">{area.map((_,i)=><span className={selected&&selected.source===source&&i+1>=selected.start_line&&i+1<=selected.end_line?'picked':''} key={i}>{i+1}</span>)}</div><textarea aria-label={title} spellCheck={false} value={value} onChange={e=>onChange(e.target.value)} placeholder={source==='logs'?'2026-10-13 10:24:33 ERROR connection refused…':'services:\n  app:\n    depends_on:\n      - db'} /></div><div className="editor-bottom"><span>{area.length} lines</span><span>{value.length.toLocaleString()} / 100,000 chars</span></div></div>
-}
-
-function report(r:Result,error:string,health:string) {
-  const findings = r.findings.map(f => `### ${f.title} — ${f.kind}\n${f.explanation}\n${f.evidence.map(e => `- ${e.source}:${e.start_line}-${e.end_line}: \`${e.quote}\` (source matched: ${f.source_matched})`).join('\n')}`).join('\n\n')
-  const changes = r.proposed_changes.map(c => `${c.explanation}\n\n\`\`\`yaml\n${c.after}\n\`\`\``).join('\n\n')
-  return `# CloudSage AI incident report\n\n## Summary\n${r.summary}\n\nStatus: ${r.status}\nModel: ${r.model_identifier} (${r.analysis_source})\n\n## Findings\n${findings}\n\n## Proposed changes\n${changes}\n\n## Verification\nOriginal error: ${error}\nApplication health: ${health}\n\n${r.caveat}\n`
+function ProgressSteps({ inputsValid, analyzed, verified, mode }: { inputsValid: boolean; analyzed: boolean; verified: boolean; mode: AnalysisMode|null }) {
+  const steps = [
+    { label: 'Add evidence', complete: inputsValid, active: !inputsValid },
+    { label: 'Diagnose', complete: analyzed, active: inputsValid&&!analyzed },
+    { label: 'Verify recovery', complete: verified, active: analyzed&&!verified },
+  ]
+  return <nav className="progress-steps" aria-label="Diagnosis progress">{steps.map((step,index)=><div key={step.label} className={`progress-step ${step.complete?'complete':''} ${step.active?'active':''}`} aria-current={step.active?'step':undefined}><span className="progress-index">{step.complete?<Check size={13}/>:`0${index+1}`}</span><span>{step.label}</span>{index===1&&mode==='demo'&&<small>DEMO</small>}{index<steps.length-1&&<i className="progress-connector"/>}</div>)}</nav>
 }
