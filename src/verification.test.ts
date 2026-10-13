@@ -19,4 +19,8 @@ describe('before/after comparison', () => {
   it('marks empty new logs as inconclusive', () => {
     expect(compareIncident(['original error'], '', 'failed')).toEqual({ originalError: 'inconclusive', applicationHealth: 'failed' })
   })
+
+  it('does not invent a failure signature when diagnosis has no log citations', () => {
+    expect(compareIncident([], 'Fresh logs without an original signature', 'not checked')).toEqual({ originalError: 'inconclusive', applicationHealth: 'not checked' })
+  })
 })
