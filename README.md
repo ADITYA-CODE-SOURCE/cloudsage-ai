@@ -47,7 +47,7 @@ cd cloudsage-ai
 npm run dev
 ```
 
-Open <http://localhost:5173>. The frontend contacts `http://localhost:8000`; set `VITE_API_URL` at build/dev time to change the API origin. Backend CORS allows only `FRONTEND_ORIGIN` (default `http://localhost:5173`).
+Open <http://localhost:5173>. The frontend contacts `http://localhost:8000` by default. Configure `VITE_API_BASE_URL` in the root `.env` before starting Vite to change the API origin; the existing `VITE_API_URL` name is retained as a fallback. The Settings view can also apply a temporary in-memory API URL for the current tab. Backend CORS allows only `FRONTEND_ORIGIN` (default `http://localhost:5173`).
 
 ## Model configuration and status
 
