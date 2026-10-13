@@ -13,7 +13,7 @@
 
 A separate minimal provider probe returned Google Gen AI HTTP 500 `INTERNAL`. A later single direct backend diagnosis invocation also raised the sanitized HTTP 502 provider request failure. It was not issued from the browser UI. These results do not establish whether a credential, account permission, network, model access, or provider service caused the failures. There were no successful model identifiers, findings, citations, or proposals, so model access and response quality remain unverified; no accuracy or success is claimed.
 
-During the Phase 4 retest, the configured local `.env` key was present, but its rotation from the previously exposed key was not confirmed. One direct invocation of `app.analyzer.diagnose()` returned the generic HTTP 502. No second live request was made, no response was served through the browser, and the UI must not be described as completing a live diagnosis.
+During the Phase 4 retest, a single `POST /api/diagnose` used the key configured in the ignored local `.env`. The endpoint returned HTTP 502 with the same generic provider error before a diagnosis. Rotation from the previously exposed key was not independently confirmed. The request used dummy inputs, no secret value was recorded, no retry was made, and this was not a successful browser-to-Gemma workflow.
 
 The key used in the local ignored `.env` had previously been pasted into chat. Rotation was not independently confirmed. Rotate it in Google AI Studio if that has not already happened. Do not copy credential values into this document, chat, screenshots, or Git.
 

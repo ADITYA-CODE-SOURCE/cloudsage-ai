@@ -2,7 +2,7 @@
 
 ## Result
 
-**Partially rehearsed on 2026-10-13 against merged `main` (`25c7e6f`).** Local frontend/backend connectivity, the explicit synthetic preview workflow, automated UI interactions, and all live Compose health scenarios passed. One direct invocation of the backend diagnosis function used the key configured in the ignored local `.env`; it raised the backend's sanitized HTTP 502 before returning a diagnosis. This was not a diagnosis initiated through the live browser UI. Whether that local value had been rotated from the previously exposed credential was not independently confirmed. No secret value is recorded here.
+**Partially rehearsed on 2026-10-13 against merged `main` (`25c7e6f`).** Local frontend/backend connectivity, the explicit synthetic preview workflow, automated UI interactions, and all live Compose health scenarios passed. A single `POST /api/diagnose` with dummy inputs and the key configured in the ignored local `.env` returned sanitized HTTP 502 before producing a diagnosis. It was an API request, not a completed browser-to-Gemma workflow. Whether the local value had been rotated from the previously exposed credential was not independently confirmed. No secret value is recorded here.
 
 This is not a claim that the complete live-AI user journey passed.
 
@@ -14,7 +14,7 @@ This is not a claim that the complete live-AI user journey passed.
 | Backend `GET /api/health` | HTTP 200, `{"status":"ok"}` |
 | Backend CORS for `http://localhost:5173` | `Access-Control-Allow-Origin` matched the configured frontend origin |
 | `POST /api/diagnose` with dummy data and no backend key | HTTP 503 with the expected missing-`GEMINI_API_KEY` message; no saved/demo answer substituted |
-| One direct backend diagnosis invocation with the locally configured key | Backend HTTPException 502, `Gemma provider request failed. Check network access and backend configuration.`; no diagnosis/model/citations returned; no retry; browser UI was not connected to this credential |
+| One `POST /api/diagnose` with the locally configured key | HTTP 502, `Gemma provider request failed. Check network access and backend configuration.`; no diagnosis/model/citations returned; no retry; this did not complete the browser UI flow |
 | Frontend UI tests | 17 passed across 4 files; includes sample fill without analysis, mocked live API contract and citations, evidence navigation/highlighting, result views, separated manual health comparison, and explicit demo badge |
 | Backend and demo tests | 17 passed; two upstream deprecation warnings |
 | Production frontend build | Passed |
